@@ -30,7 +30,7 @@ def _load_env_file(path: pathlib.Path) -> None:
         key, _, value = line.partition("=")
         key = key.strip()
         value = value.strip().strip('"').strip("'")
-        os.environ.setdefault(key, value)
+        os.environ[key] = value
 
 
 _REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
