@@ -13,6 +13,11 @@ personas/
   charlie.json          # persona payload (system_prompt, greeting, layers, tools)
 scripts/
   create_persona.py     # POST personas/<name>.json to Tavus /v2/personas
+server/
+  app.py                # Flask: POST /tavus/webhook (tool_call receiver)
+  tools.py              # tool-name dispatcher
+  linear_client.py      # Linear GraphQL client
+  priority.py           # persona priority -> Linear int mapping
 ```
 
 ## Create the persona
@@ -76,6 +81,77 @@ backing services exist:
 
   Your webhook handler is responsible for actually creating the Linear ticket
   and the calendar invite — Tavus only forwards the model's tool call.
+
+## Running the webhook server
+
+The persona's `create_linear_ticket` tool is delivered to whatever URL is set
+as the conversation's `callback_url`. This repo ships a minimal Flask
+receiver that turns those tool calls into real Linear tickets.
+
+1. Add the new env vars to `.env`:
+
+   ```
+   LINEAR_API_KEY=lin_api_...                  # Linear Personal API Key
+   LINEAR_DEFAULT_TEAM_KEY=ENT                 # Linear team to file tickets under
+   TAVUS_WEBHOOK_SECRET=<a long random string> # shared with the conversation
+   ```
+
+   Generate a Linear Personal API Key at
+   `https://linear.app/<workspace>/settings/account/security`.
+
+2. Install deps and run the server:
+
+   ```bash
+   pip install -r requirements.txt
+   flask --app server.app run --port 8080
+   ```
+
+3. Expose it publicly for Tavus to reach (during dev):
+
+   ```bash
+   ngrok http 8080
+   ```
+
+4. Point the conversation at it. The `callback_url` lives on the
+   conversation, not the persona:
+
+   ```bash
+   curl -X POST https://tavusapi.com/v2/conversations \
+     -H "x-api-key: $TAVUS_API_KEY" \
+     -H "Content-Type: application/json" \
+     -d '{
+       "persona_id": "<persona_id>",
+       "callback_url": "https://<your-ngrok-subdomain>.ngrok.app/tavus/webhook"
+     }'
+   ```
+
+   Tavus will POST each `tool_call` to that URL. Configure the same
+   `TAVUS_WEBHOOK_SECRET` value as the `X-Webhook-Secret` header on the
+   Tavus side (or use a proxy that injects it) — the server rejects
+   requests without a matching secret with 401.
+
+5. Smoke test without Tavus:
+
+   ```bash
+   curl -X POST http://localhost:8080/tavus/webhook \
+     -H "X-Webhook-Secret: $TAVUS_WEBHOOK_SECRET" \
+     -H "Content-Type: application/json" \
+     -d '{
+       "tool_call": {
+         "name": "create_linear_ticket",
+         "arguments": {
+           "assignee": "yonatan@tavus.io",
+           "title": "Test ticket from Charlie",
+           "description": "Filed via the webhook smoke test.",
+           "priority": "medium"
+         }
+       }
+     }'
+   ```
+
+   On success the response is
+   `{"result": {"issue_id": "...", "identifier": "ENT-123", "url": "https://linear.app/..."}}`
+   and a ticket appears in the target Linear team.
 
 ## Related repos
 
