@@ -10,6 +10,8 @@ similar for a public URL during dev).
 
 from __future__ import annotations
 
+import json
+import logging
 import os
 import pathlib
 from typing import Any
@@ -38,6 +40,62 @@ _load_env_file(_REPO_ROOT / ".env")
 
 
 app = Flask(__name__)
+
+
+_LOG_LEVEL = os.environ.get("WEBHOOK_LOG_LEVEL", "INFO").upper()
+logging.basicConfig(
+    level=getattr(logging, _LOG_LEVEL, logging.INFO),
+    format="%(asctime)s %(levelname)s %(message)s",
+)
+app.logger.setLevel(getattr(logging, _LOG_LEVEL, logging.INFO))
+
+
+def _short(value: Any, limit: int = 1200) -> str:
+    """Compact JSON repr truncated to ``limit`` chars for log lines."""
+    try:
+        text = json.dumps(value, ensure_ascii=False, default=str)
+    except TypeError:
+        text = str(value)
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _is_tool_call(payload: dict[str, Any]) -> bool:
+    """True if the payload posted to ``/tavus/webhook`` (no tool in URL) looks like a tool call.
+
+    Tavus sends three categories of POSTs to a conversation's ``callback_url``:
+    - ``message_type: "system"`` — replica join/leave, conversation lifecycle.
+    - ``message_type: "application"`` — perception analysis, etc.
+    - Tool calls — when ``delivery.api.url`` is set per-tool, Tavus POSTs the
+      *arguments object directly* as the request body (no wrapper, no
+      ``message_type``). The tool name comes from the URL path, NOT the body.
+
+    The per-tool routes (``/tavus/webhook/<tool_name>``) are the canonical
+    delivery path. This helper only matters for the legacy combined route,
+    where we use ``message_type`` to filter out system events.
+    """
+    if not isinstance(payload, dict):
+        return False
+
+    message_type = (payload.get("message_type") or "").lower()
+    if message_type == "tool_call":
+        return True
+    if message_type:
+        return False
+
+    return bool(payload.get("tool_call") or (payload.get("function") or {}).get("name"))
+
+
+def _check_webhook_auth() -> tuple[bool, Any]:
+    """Returns ``(ok, response_tuple_or_none)``.  Response_tuple is set when auth fails."""
+    auth_enabled = os.environ.get("WEBHOOK_AUTH_ENABLED", "true").lower() != "false"
+    if not auth_enabled:
+        return True, None
+    expected_secret = os.environ.get("TAVUS_WEBHOOK_SECRET")
+    if not expected_secret:
+        return False, (jsonify({"error": "server not configured: TAVUS_WEBHOOK_SECRET unset"}), 500)
+    if request.headers.get("X-Webhook-Secret", "") != expected_secret:
+        return False, (jsonify({"error": "unauthorized"}), 401)
+    return True, None
 
 
 def _extract_tool_call(payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
@@ -81,29 +139,77 @@ def _extract_tool_call(payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     return name, arguments
 
 
-@app.post("/tavus/webhook")
-def tavus_webhook():
-    auth_enabled = os.environ.get("WEBHOOK_AUTH_ENABLED", "true").lower() != "false"
-    if auth_enabled:
-        expected_secret = os.environ.get("TAVUS_WEBHOOK_SECRET")
-        if not expected_secret:
-            return jsonify({"error": "server not configured: TAVUS_WEBHOOK_SECRET unset"}), 500
+def _run_tool(name: str, arguments: dict[str, Any]):
+    """Shared dispatch + error handling used by both webhook routes."""
+    try:
+        app.logger.info("Dispatching tool %s args=%s", name, _short(arguments))
+        result = dispatch(name, arguments)
+    except ToolError as exc:
+        app.logger.warning("Tool %s rejected: %s", name, exc)
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:  # noqa: BLE001 - want the traceback in dev logs
+        app.logger.exception("Tool %s crashed: %s", name, exc)
+        return jsonify({"error": f"internal error: {exc}"}), 500
 
-        presented = request.headers.get("X-Webhook-Secret", "")
-        if presented != expected_secret:
-            return jsonify({"error": "unauthorized"}), 401
+    app.logger.info("Tool %s succeeded: %s", name, _short(result))
+    return jsonify({"result": result}), 200
+
+
+@app.post("/tavus/webhook/<tool_name>")
+def tavus_tool_webhook(tool_name: str):
+    """Per-tool delivery target. Tavus POSTs the arguments object directly."""
+    ok, err = _check_webhook_auth()
+    if not ok:
+        return err
 
     payload = request.get_json(silent=True)
     if payload is None:
+        app.logger.warning(
+            "Tool %s body was not valid JSON (raw=%s)",
+            tool_name,
+            _short(request.get_data(as_text=True), 400),
+        )
         return jsonify({"error": "request body must be JSON"}), 400
+
+    if not isinstance(payload, dict):
+        return jsonify({"error": "arguments must be a JSON object"}), 400
+
+    app.logger.info("Tool %s payload: %s", tool_name, _short(payload))
+    return _run_tool(tool_name, payload)
+
+
+@app.post("/tavus/webhook")
+def tavus_webhook():
+    """Legacy combined route. Tavus delivers system/lifecycle events here, plus
+    any tool whose ``delivery.api.url`` still points at the un-suffixed URL.
+    """
+    ok, err = _check_webhook_auth()
+    if not ok:
+        return err
+
+    payload = request.get_json(silent=True)
+    if payload is None:
+        app.logger.warning("Webhook body was not valid JSON (raw=%s)", _short(request.get_data(as_text=True), 400))
+        return jsonify({"error": "request body must be JSON"}), 400
+
+    app.logger.info("Webhook payload: %s", _short(payload))
+
+    if not _is_tool_call(payload):
+        event_label = (
+            payload.get("event_type")
+            or payload.get("message_type")
+            or "non-tool_call event"
+        )
+        app.logger.info("Ignoring %s webhook (no tool_call payload)", event_label)
+        return jsonify({"ok": True, "ignored": event_label}), 200
 
     try:
         name, arguments = _extract_tool_call(payload)
-        result = dispatch(name, arguments)
     except ToolError as exc:
+        app.logger.warning("Tool call rejected: %s", exc)
         return jsonify({"error": str(exc)}), 400
 
-    return jsonify({"result": result}), 200
+    return _run_tool(name, arguments)
 
 
 @app.get("/healthz")
