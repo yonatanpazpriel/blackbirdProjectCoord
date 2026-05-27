@@ -34,8 +34,8 @@ _team_id_cache: dict[str, str] = {}
 def normalize_issue_identifier(ticket_id_or_url: str) -> str:
     """Extract a Linear issue identifier from an identifier or issue URL."""
     value = ticket_id_or_url.strip()
-    match = re.search(r"\b[A-Z][A-Z0-9]+-\d+\b", value)
-    return match.group(0) if match else value
+    match = re.search(r"\b[A-Z][A-Z0-9]*-\d+\b", value, flags=re.IGNORECASE)
+    return match.group(0).upper() if match else value
 
 
 def _graphql(query: str, variables: dict[str, Any], api_key: str) -> dict[str, Any]:
