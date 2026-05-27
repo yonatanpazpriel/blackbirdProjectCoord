@@ -78,9 +78,10 @@ def resolve_team_id(team_key: str, *, api_key: str) -> str:
     return team_id
 
 
-def resolve_assignee_id(query_str: str, *, api_key: str) -> str:
+def resolve_assignee(query_str: str, *, api_key: str) -> dict[str, Any]:
     """Look up a Linear user by email, displayName, or full name.
 
+    Returns the matched user node: ``{id, displayName, name, email, active}``.
     Raises AssigneeNotFound on 0 active matches, AssigneeAmbiguous on >1.
     """
     query = """
@@ -112,7 +113,7 @@ def resolve_assignee_id(query_str: str, *, api_key: str) -> str:
         if query_str.lower() in {(n.get("email") or "").lower(), (n.get("displayName") or "").lower()}
     ]
     if len(exact) == 1:
-        return exact[0]["id"]
+        return exact[0]
 
     if len(active) > 1:
         candidates = ", ".join(
@@ -123,7 +124,12 @@ def resolve_assignee_id(query_str: str, *, api_key: str) -> str:
             "ask the user to specify by email or full display name"
         )
 
-    return active[0]["id"]
+    return active[0]
+
+
+def resolve_assignee_id(query_str: str, *, api_key: str) -> str:
+    """Look up a Linear user by email/displayName/name and return their UUID."""
+    return resolve_assignee(query_str, api_key=api_key)["id"]
 
 
 def create_issue(

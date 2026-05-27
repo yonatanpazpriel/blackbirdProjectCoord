@@ -8,10 +8,16 @@ HTTP response body.
 from __future__ import annotations
 
 import os
+import re
+from datetime import datetime, timedelta
 from typing import Any, Callable
 
-from server import linear_client, slack_client
+from server import google_calendar, linear_client, slack_client
 from server.priority import to_linear_priority
+
+
+_EMAIL_REGEX = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+_CALENDAR_DESCRIPTION_MAX_CHARS = 8000
 
 
 class ToolError(Exception):
@@ -245,10 +251,134 @@ def _send_linear_creator_summary(arguments: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _resolve_attendee_email(query_str: str, *, api_key: str) -> tuple[str, dict[str, Any] | None]:
+    """Return ``(email, linear_user_or_None)`` for a tool-supplied attendee.
+
+    Accepts an RFC-822-ish email directly; otherwise looks the name up in
+    Linear and returns the resolved user's email.
+    """
+    value = (query_str or "").strip()
+    if _EMAIL_REGEX.match(value):
+        return value, None
+
+    try:
+        user = linear_client.resolve_assignee(value, api_key=api_key)
+    except linear_client.AssigneeNotFound as exc:
+        raise ToolError(str(exc)) from exc
+    except linear_client.AssigneeAmbiguous as exc:
+        raise ToolError(str(exc)) from exc
+    except linear_client.LinearError as exc:
+        raise ToolError(f"linear assignee lookup failed: {exc}") from exc
+
+    email = (user.get("email") or "").strip()
+    if not email:
+        raise ToolError(
+            f"Linear user {value!r} has no email on file; "
+            "ask the assigner for the attendee's email directly"
+        )
+    return email, user
+
+
+def _schedule_calendar_call(arguments: dict[str, Any]) -> dict[str, Any]:
+    required = ("attendee_name", "start_time", "duration", "topic", "ticket_id")
+    missing = [k for k in required if not arguments.get(k)]
+    if missing:
+        raise ToolError(f"missing required argument(s): {', '.join(missing)}")
+
+    api_key = _require_env("LINEAR_API_KEY")
+    client_id = _require_env("GOOGLE_OAUTH_CLIENT_ID")
+    client_secret = _require_env("GOOGLE_OAUTH_CLIENT_SECRET")
+    refresh_token = _require_env("GOOGLE_OAUTH_REFRESH_TOKEN")
+    charlie_meet_email = _require_env("CHARLIE_MEET_EMAIL")
+    calendar_id = os.environ.get("GOOGLE_CALENDAR_ID") or "primary"
+
+    try:
+        duration = int(arguments["duration"])
+    except (TypeError, ValueError) as exc:
+        raise ToolError(
+            f"invalid duration {arguments['duration']!r}; expected integer minutes"
+        ) from exc
+    if duration <= 0:
+        raise ToolError(f"invalid duration {duration!r}; must be > 0 minutes")
+
+    try:
+        start_dt = datetime.fromisoformat(str(arguments["start_time"]))
+    except ValueError as exc:
+        raise ToolError(
+            f"invalid start_time {arguments['start_time']!r}; "
+            "expected ISO-8601 (e.g. 2026-06-01T15:00:00-07:00)"
+        ) from exc
+    end_dt = start_dt + timedelta(minutes=duration)
+
+    attendee_email, linear_user = _resolve_attendee_email(
+        arguments["attendee_name"], api_key=api_key
+    )
+
+    try:
+        issue = linear_client.get_issue_context(arguments["ticket_id"], api_key=api_key)
+    except linear_client.LinearError as exc:
+        raise ToolError(f"linear issue lookup failed: {exc}") from exc
+
+    identifier = issue.get("identifier") or arguments["ticket_id"]
+    title = issue.get("title") or "Untitled Linear ticket"
+    summary = f"Check-in: {identifier} — {title}"
+
+    description_parts: list[str] = [str(arguments["topic"]).strip()]
+    if issue.get("url"):
+        description_parts.append(f"Linear: {issue['url']}")
+    issue_description = (issue.get("description") or "").strip()
+    if issue_description:
+        description_parts.append(issue_description)
+    description = "\n\n".join(part for part in description_parts if part)
+    if len(description) > _CALENDAR_DESCRIPTION_MAX_CHARS:
+        description = description[: _CALENDAR_DESCRIPTION_MAX_CHARS - 1] + "…"
+
+    attendees: list[dict[str, Any]] = [{"email": attendee_email}]
+    if charlie_meet_email.lower() != attendee_email.lower():
+        attendees.append({"email": charlie_meet_email})
+
+    try:
+        event = google_calendar.create_event(
+            calendar_id=calendar_id,
+            summary=summary,
+            description=description,
+            start_iso=start_dt.isoformat(),
+            end_iso=end_dt.isoformat(),
+            attendees=attendees,
+            client_id=client_id,
+            client_secret=client_secret,
+            refresh_token=refresh_token,
+        )
+    except google_calendar.GoogleCalendarError as exc:
+        raise ToolError(f"google calendar event creation failed: {exc}") from exc
+
+    return {
+        "event_id": event["event_id"],
+        "html_link": event["html_link"],
+        "meet_link": event["meet_link"],
+        "start": event["start"],
+        "end": event["end"],
+        "attendees": event["attendees"],
+        "ticket": {
+            "identifier": identifier,
+            "url": issue.get("url"),
+            "title": title,
+        },
+        "attendee": {
+            "email": attendee_email,
+            "name": (
+                (linear_user or {}).get("displayName")
+                or (linear_user or {}).get("name")
+            ),
+        },
+    }
+
+
 _HANDLERS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "create_linear_ticket": _create_linear_ticket,
     "get_linear_ticket_context": _get_linear_ticket_context,
     "send_linear_creator_summary": _send_linear_creator_summary,
+    "schedule_calendar_call": _schedule_calendar_call,
 }
 
 
