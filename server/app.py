@@ -111,18 +111,11 @@ def _extract_tool_call(payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     if not isinstance(tool_call, dict):
         raise ToolError("tool_call must be an object")
 
-    name = (
-        tool_call.get("name")
-        or tool_call.get("tool_name")
-        or (tool_call.get("function") or {}).get("name")
-    )
-    if not name:
-        raise ToolError("missing tool name")
-
     arguments = (
         tool_call.get("arguments")
         or tool_call.get("parameters")
         or (tool_call.get("function") or {}).get("arguments")
+        or tool_call
         or {}
     )
     if isinstance(arguments, str):
@@ -135,6 +128,15 @@ def _extract_tool_call(payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
 
     if not isinstance(arguments, dict):
         raise ToolError("arguments must be an object")
+
+    name = (
+        tool_call.get("name")
+        or tool_call.get("tool_name")
+        or (tool_call.get("function") or {}).get("name")
+        or _infer_tool_name(arguments)
+    )
+    if not name:
+        raise ToolError("missing tool name")
 
     return name, arguments
 
@@ -153,6 +155,15 @@ def _run_tool(name: str, arguments: dict[str, Any]):
 
     app.logger.info("Tool %s succeeded: %s", name, _short(result))
     return jsonify({"result": result}), 200
+
+
+def _infer_tool_name(arguments: dict[str, Any]) -> str | None:
+    """Infer Tavus API-delivered tool calls that send arguments as the body."""
+    if {"summary", "blockers", "questions", "next_steps"} & set(arguments):
+        return "send_linear_creator_summary"
+    if "ticket_id_or_url" in arguments:
+        return "get_linear_ticket_context"
+    return None
 
 
 @app.post("/tavus/webhook/<tool_name>")
