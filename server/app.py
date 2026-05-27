@@ -83,13 +83,15 @@ def _extract_tool_call(payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
 
 @app.post("/tavus/webhook")
 def tavus_webhook():
-    expected_secret = os.environ.get("TAVUS_WEBHOOK_SECRET")
-    if not expected_secret:
-        return jsonify({"error": "server not configured: TAVUS_WEBHOOK_SECRET unset"}), 500
+    auth_enabled = os.environ.get("WEBHOOK_AUTH_ENABLED", "true").lower() != "false"
+    if auth_enabled:
+        expected_secret = os.environ.get("TAVUS_WEBHOOK_SECRET")
+        if not expected_secret:
+            return jsonify({"error": "server not configured: TAVUS_WEBHOOK_SECRET unset"}), 500
 
-    presented = request.headers.get("X-Webhook-Secret", "")
-    if presented != expected_secret:
-        return jsonify({"error": "unauthorized"}), 401
+        presented = request.headers.get("X-Webhook-Secret", "")
+        if presented != expected_secret:
+            return jsonify({"error": "unauthorized"}), 401
 
     payload = request.get_json(silent=True)
     if payload is None:
