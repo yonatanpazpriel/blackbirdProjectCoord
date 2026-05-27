@@ -17,6 +17,7 @@ server/
   app.py                # Flask: POST /tavus/webhook (tool_call receiver)
   tools.py              # tool-name dispatcher
   linear_client.py      # Linear GraphQL client
+  slack_client.py       # Slack Web API client
   priority.py           # persona priority -> Linear int mapping
 ```
 
@@ -84,15 +85,16 @@ backing services exist:
 
 ## Running the webhook server
 
-The persona's `create_linear_ticket` tool is delivered to whatever URL is set
-as the conversation's `callback_url`. This repo ships a minimal Flask
-receiver that turns those tool calls into real Linear tickets.
+The persona tools are delivered to whatever URL is set as the conversation's
+`callback_url`. This repo ships a minimal Flask receiver that turns those tool
+calls into real Linear tickets and Charlie Meet follow-up Slack DMs.
 
 1. Add the new env vars to `.env`:
 
    ```
    LINEAR_API_KEY=lin_api_...                  # Linear Personal API Key
    LINEAR_DEFAULT_TEAM_KEY=ENT                 # Linear team to file tickets under
+   SLACK_BOT_TOKEN=xoxb-...                    # Slack bot token with users:read.email, im:write, chat:write
    TAVUS_WEBHOOK_SECRET=<a long random string> # shared with the conversation
    ```
 
@@ -152,6 +154,47 @@ receiver that turns those tool calls into real Linear tickets.
    On success the response is
    `{"result": {"issue_id": "...", "identifier": "ENT-123", "url": "https://linear.app/..."}}`
    and a ticket appears in the target Linear team.
+
+6. Smoke test Charlie Meet's ticket context lookup:
+
+   ```bash
+   curl -X POST http://localhost:8080/tavus/webhook \
+     -H "X-Webhook-Secret: $TAVUS_WEBHOOK_SECRET" \
+     -H "Content-Type: application/json" \
+     -d '{
+       "tool_call": {
+         "name": "get_linear_ticket_context",
+         "arguments": {
+           "ticket_id_or_url": "ENT-123"
+         }
+       }
+     }'
+   ```
+
+7. Smoke test Charlie Meet's creator summary Slack DM:
+
+   ```bash
+   curl -X POST http://localhost:8080/tavus/webhook \
+     -H "X-Webhook-Secret: $TAVUS_WEBHOOK_SECRET" \
+     -H "Content-Type: application/json" \
+     -d '{
+       "tool_call": {
+         "name": "send_linear_creator_summary",
+         "arguments": {
+           "ticket_id_or_url": "ENT-123",
+           "creator": "requester@company.com",
+           "attendee": "assignee@company.com",
+           "summary": "The assignee understands the request and confirmed the expected outcome.",
+           "blockers": [],
+           "questions": ["Should this include the older import path?"],
+           "next_steps": ["Creator to answer the import-path question.", "Assignee to begin after confirmation."]
+         }
+       }
+     }'
+   ```
+
+   The server fetches the Linear issue, prefers the issue creator's email from
+   Linear, opens a Slack DM with that person, and posts the meeting summary.
 
 ## Related repos
 

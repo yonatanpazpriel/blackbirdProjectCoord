@@ -7,6 +7,7 @@ browser auth flow that's not suitable for a headless server.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import requests
@@ -28,6 +29,13 @@ class AssigneeAmbiguous(LinearError):
 
 
 _team_id_cache: dict[str, str] = {}
+
+
+def normalize_issue_identifier(ticket_id_or_url: str) -> str:
+    """Extract a Linear issue identifier from an identifier or issue URL."""
+    value = ticket_id_or_url.strip()
+    match = re.search(r"\b[A-Z][A-Z0-9]+-\d+\b", value)
+    return match.group(0) if match else value
 
 
 def _graphql(query: str, variables: dict[str, Any], api_key: str) -> dict[str, Any]:
@@ -150,3 +158,41 @@ def create_issue(
     if not result.get("success") or not result.get("issue"):
         raise LinearError(f"issueCreate did not return an issue: {result!r}")
     return result["issue"]
+
+
+def get_issue_context(ticket_id_or_url: str, *, api_key: str) -> dict[str, Any]:
+    """Fetch issue details needed by the meeting coordinator persona."""
+    identifier = normalize_issue_identifier(ticket_id_or_url)
+    query = """
+    query($id: String!) {
+        issue(id: $id) {
+            id
+            identifier
+            url
+            title
+            description
+            priority
+            dueDate
+            createdAt
+            updatedAt
+            creator { id name displayName email }
+            assignee { id name displayName email }
+            state { id name type }
+            team { id key name }
+            labels { nodes { id name } }
+            comments(first: 10) {
+                nodes {
+                    id
+                    body
+                    createdAt
+                    user { id name displayName email }
+                }
+            }
+        }
+    }
+    """
+    data = _graphql(query, {"id": identifier}, api_key)
+    issue = data.get("issue")
+    if not issue:
+        raise LinearError(f"no Linear issue found for {ticket_id_or_url!r}")
+    return issue
