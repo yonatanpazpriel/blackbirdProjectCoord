@@ -12,7 +12,7 @@ import re
 from datetime import datetime, time, timedelta, timezone
 from typing import Any, Callable
 
-from server import google_calendar, linear_client, meeting_registry, slack_client
+from server import google_calendar, linear_client, slack_client
 from server.priority import to_linear_priority
 
 try:
@@ -147,11 +147,7 @@ def _display_user(user: dict[str, Any] | None) -> dict[str, Any] | None:
 
 def _ticket_dump(issue: dict[str, Any]) -> dict[str, Any]:
     """Project a Linear `get_issue_context` response into the shape we
-    surface to charlie-meet via tools and persist in the meeting registry.
-
-    Keep this in sync with the persona-side schema so
-    ``get_linear_ticket_context`` and ``get_meeting_context`` return
-    interchangeable ticket shapes.
+    surface to charlie-meet via `get_linear_ticket_context`.
     """
     return {
         "issue_id": issue.get("id"),
@@ -198,45 +194,6 @@ def _get_linear_ticket_context(arguments: dict[str, Any]) -> dict[str, Any]:
         raise ToolError(f"linear issue lookup failed: {exc}") from exc
 
     return _ticket_dump(issue)
-
-
-def _get_meeting_context(arguments: dict[str, Any]) -> dict[str, Any]:
-    """Return the ticket charlie-meet should discuss in this Google Meet.
-
-    Resolution order:
-      1. If ``meet_link`` is supplied, exact-match the registry.
-      2. Else, claim the most recently scheduled meeting that hasn't been
-         claimed yet (within a 6-hour freshness window).
-
-    Single-user demo concurrency model — if two meets start within seconds
-    and neither passes ``meet_link``, the first ``get_meeting_context``
-    call wins the newest record. Pass ``meet_link`` when you can.
-    """
-    meet_link = (arguments.get("meet_link") or "").strip()
-    if meet_link:
-        record = meeting_registry.lookup_by_meet_link(meet_link)
-        if not record:
-            raise ToolError(
-                f"no scheduled meeting found in registry for meet_link {meet_link!r}; "
-                "fall back to asking the attendee for the Linear ticket ID"
-            )
-    else:
-        record = meeting_registry.claim_most_recent_unclaimed()
-        if not record:
-            raise ToolError(
-                "no recently scheduled meeting available; ask the attendee "
-                "for the Linear ticket ID and use get_linear_ticket_context instead"
-            )
-
-    return {
-        "meet_link": record.get("meet_link"),
-        "ticket": record.get("ticket"),
-        "scheduled": {
-            "start": record.get("start"),
-            "end": record.get("end"),
-            "event_id": record.get("event_id"),
-        },
-    }
 
 
 def _listify(value: Any) -> list[str]:
@@ -476,38 +433,6 @@ def _schedule_calendar_call(arguments: dict[str, Any]) -> dict[str, Any]:
     except google_calendar.GoogleCalendarError as exc:
         raise ToolError(f"google calendar event creation failed: {exc}") from exc
 
-    ticket_dump = _ticket_dump(issue)
-
-    meet_link = event.get("meet_link")
-    if meet_link:
-        try:
-            meeting_registry.record_meeting(
-                {
-                    "meet_link": meet_link,
-                    "event_id": event["event_id"],
-                    "html_link": event.get("html_link"),
-                    "start": event.get("start"),
-                    "end": event.get("end"),
-                    "topic": str(arguments["topic"]).strip(),
-                    "ticket": ticket_dump,
-                    "attendee": {
-                        "email": attendee_email,
-                        "name": (
-                            (linear_user or {}).get("displayName")
-                            or (linear_user or {}).get("name")
-                        ),
-                    },
-                }
-            )
-        except (OSError, ValueError) as exc:
-            # Registry write is best-effort: a failure here shouldn't block
-            # the calendar invite that's already been sent.
-            import logging
-
-            logging.getLogger(__name__).warning(
-                "meeting_registry write failed for %s: %s", meet_link, exc
-            )
-
     return {
         "event_id": event["event_id"],
         "html_link": event["html_link"],
@@ -536,7 +461,6 @@ _HANDLERS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "get_linear_ticket_context": _get_linear_ticket_context,
     "send_linear_creator_summary": _send_linear_creator_summary,
     "schedule_calendar_call": _schedule_calendar_call,
-    "get_meeting_context": _get_meeting_context,
 }
 
 

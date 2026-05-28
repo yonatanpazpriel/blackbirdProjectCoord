@@ -109,18 +109,6 @@ def main() -> int:
         bad("schedule_calendar_call", http, payload)
 
     # --- charlie-meet ---
-    print("\n=== CHARLIE-MEET: get_meeting_context (by meet_link) ===")
-    if meet_link:
-        http, payload = post(
-            base, "get_meeting_context", {"meet_link": meet_link}, secret=secret
-        )
-        if http == 200 and (payload.get("result") or {}).get("ticket"):
-            ok("get_meeting_context", (payload["result"]["ticket"] or {}).get("identifier", ""))
-        else:
-            bad("get_meeting_context", http, payload)
-    else:
-        skip("get_meeting_context", "schedule_calendar_call did not return meet_link")
-
     print("\n=== CHARLIE-MEET: get_linear_ticket_context ===")
     http, payload = post(
         base, "get_linear_ticket_context", {"ticket_id_or_url": ticket}, secret=secret
@@ -149,15 +137,6 @@ def main() -> int:
         )
     else:
         bad("send_linear_creator_summary", http, payload)
-
-    print("\n=== CHARLIE-MEET: get_meeting_context (no-arg claim) ===")
-    http, payload = post(base, "get_meeting_context", {}, secret=secret)
-    if http == 200 and payload.get("result"):
-        ok("get_meeting_context (claim)", (payload["result"].get("ticket") or {}).get("identifier", ""))
-    elif http == 400 and "no meeting" in str(payload.get("error", "")).lower():
-        skip("get_meeting_context (claim)", "no unclaimed meetings (already claimed)")
-    else:
-        bad("get_meeting_context (claim)", http, payload)
 
     print(f"\n=== SUMMARY: {passed} passed, {failed} failed, {skipped} skipped ===")
     return 1 if failed else 0

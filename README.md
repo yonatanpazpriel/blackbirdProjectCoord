@@ -20,10 +20,7 @@ server/
   linear_client.py      # Linear GraphQL client
   google_calendar.py    # Google Calendar v3 + Meet client (refresh-token auth)
   slack_client.py       # Slack Web API client
-  meeting_registry.py   # JSON-backed store: meet_link -> scheduled ticket + attendee
   priority.py           # persona priority -> Linear int mapping
-data/
-  meetings.json         # gitignored; created on first schedule_calendar_call call
 static/
   index.html            # type-to-Charlie single-page frontend (Daily iframe + roster panel)
 ```
@@ -232,55 +229,14 @@ calls into real Linear tickets and Charlie Meet follow-up Slack DMs.
    `{"result": {"event_id": "...", "html_link": "https://www.google.com/calendar/event?eid=...", "meet_link": "https://meet.google.com/...", "attendees": [...], "ticket": {"identifier": "ENT-123", ...}}}`
    and Google emails the invite to both the attendee and `CHARLIE_MEET_EMAIL`.
 
-   As a side effect, the server writes a row to `data/meetings.json` keyed by
-   the new Meet URL with the full Linear ticket dump (identifier, title,
-   description, priority, status, creator name+email, due date, labels,
-   comments) plus the attendee and the free-text topic. This is what
-   `get_meeting_context` reads back at meeting time.
-
-9. Smoke test `get_meeting_context` (the lookup charlie-meet does on join):
-
-   ```bash
-   curl -X POST http://localhost:8080/tavus/webhook \
-     -H "X-Webhook-Secret: $TAVUS_WEBHOOK_SECRET" \
-     -H "Content-Type: application/json" \
-     -d '{
-       "tool_call": {
-         "name": "get_meeting_context",
-         "arguments": {}
-       }
-     }'
-   ```
-
-   With no `meet_link`, the server returns the most recently scheduled
-   meeting that hasn't been claimed yet and marks it claimed (so the next
-   no-arg lookup won't re-return it). Pass `{"meet_link": "https://meet.google.com/..."}`
-   to do an exact match without claiming. On success the response is
-   `{"result": {"meet_link": "...", "ticket": {...full dump...}, "scheduled": {"start": "...", "end": "...", "event_id": "..."}}}`.
-
 ## How charlie-meet gets ticket context inside a Meet
 
 Google Meet doesn't expose calendar metadata (title, description,
-attendees) to participants over WebRTC, so charlie-meet has no way to read
-the event details from inside the room. Tavus's conferencing-alias
-auto-join also doesn't propagate the calendar description into the
-conversation's `conversational_context`. We bridge the gap with a local
-registry:
-
-1. When Charlie runs `schedule_calendar_call`, the server creates the
-   Google Calendar event **and** writes the Meet URL plus the full Linear
-   ticket to `data/meetings.json`.
-2. charlie-meet joins via the conferencing alias as usual.
-3. The first thing charlie-meet does on join (per its system prompt) is
-   call `get_meeting_context`. The server returns the ticket dump for that
-   Meet, so charlie-meet can confirm the identifier and dive in without
-   asking the attendee.
-4. If the meeting wasn't scheduled through Charlie (no registry row),
-   `get_meeting_context` errors and charlie-meet falls back to asking for
-   the ticket ID + calling `get_linear_ticket_context`.
-
-The registry file path is configurable via `MEETING_REGISTRY_PATH`;
-default is `data/meetings.json` at the repo root (gitignored).
+attendees) to participants over WebRTC, and Tavus's conferencing-alias
+auto-join doesn't propagate the calendar description into the
+conversation's `conversational_context`. So charlie-meet asks the
+attendee verbally for the ticket identifier at the start of the call and
+calls `get_linear_ticket_context` to look it up.
 
 ## Google Calendar setup
 
