@@ -248,6 +248,22 @@ def index():
     return send_from_directory(_STATIC_DIR, "index.html")
 
 
+@app.get("/favicon.png")
+def favicon_png():
+    return send_from_directory(_STATIC_DIR, "favicon.png", mimetype="image/png")
+
+
+@app.get("/favicon-32.png")
+def favicon_32_png():
+    return send_from_directory(_STATIC_DIR, "favicon-32.png", mimetype="image/png")
+
+
+@app.get("/favicon.ico")
+def favicon_ico():
+    """Most browsers still probe /favicon.ico by default; serve the PNG."""
+    return send_from_directory(_STATIC_DIR, "favicon.png", mimetype="image/png")
+
+
 def _webhook_base_url() -> str:
     """Return the public base URL used to build callback_url for Tavus.
 

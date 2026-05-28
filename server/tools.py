@@ -9,15 +9,53 @@ from __future__ import annotations
 
 import os
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta, timezone
 from typing import Any, Callable
 
 from server import google_calendar, linear_client, meeting_registry, slack_client
 from server.priority import to_linear_priority
 
+try:
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+except ImportError:  # Python <3.9, shouldn't hit on this project but keep us safe.
+    ZoneInfo = None  # type: ignore[assignment]
+    ZoneInfoNotFoundError = Exception  # type: ignore[assignment,misc]
+
 
 _EMAIL_REGEX = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 _CALENDAR_DESCRIPTION_MAX_CHARS = 8000
+
+# Defaults used when Charlie's Action Mode call omits these fields.
+_DEFAULT_PRIORITY = "medium"
+_DEFAULT_DURATION_MINUTES = 30
+_DEFAULT_START_HOUR = 10  # 10am local
+_DEFAULT_TIMEZONE_NAME = "America/Los_Angeles"
+
+
+def _default_timezone() -> Any:
+    """Resolve DEFAULT_TIMEZONE from env, falling back to America/Los_Angeles,
+    then UTC if zoneinfo is unavailable or the name is invalid."""
+    name = os.environ.get("DEFAULT_TIMEZONE") or _DEFAULT_TIMEZONE_NAME
+    if ZoneInfo is None:
+        return timezone.utc
+    try:
+        return ZoneInfo(name)
+    except ZoneInfoNotFoundError:
+        return timezone.utc
+
+
+def _next_business_day_at(hour: int, *, tz: Any) -> datetime:
+    """Return the next weekday (Mon–Fri) at ``hour:00`` in ``tz``.
+
+    "Next" is always tomorrow or later; we never schedule for today even if
+    it's still morning, because Charlie's defaults are for the *upcoming*
+    business day from the user's POV.
+    """
+    today = datetime.now(tz).date()
+    candidate = today + timedelta(days=1)
+    while candidate.weekday() >= 5:  # 5 = Sat, 6 = Sun
+        candidate += timedelta(days=1)
+    return datetime.combine(candidate, time(hour=hour), tzinfo=tz)
 
 
 class ToolError(Exception):
@@ -26,7 +64,9 @@ class ToolError(Exception):
 
 
 def _create_linear_ticket(arguments: dict[str, Any]) -> dict[str, Any]:
-    required = ("assignee", "title", "description", "priority")
+    # priority is now optional — server defaults to "medium" when Charlie
+    # is in Action Mode and didn't get one from the user.
+    required = ("assignee", "title", "description")
     missing = [k for k in required if not arguments.get(k)]
     if missing:
         raise ToolError(f"missing required argument(s): {', '.join(missing)}")
@@ -39,8 +79,9 @@ def _create_linear_ticket(arguments: dict[str, Any]) -> dict[str, Any]:
     if not team_key:
         raise ToolError("server not configured: LINEAR_DEFAULT_TEAM_KEY unset")
 
+    priority_value = arguments.get("priority") or _DEFAULT_PRIORITY
     try:
-        priority = to_linear_priority(arguments["priority"])
+        priority = to_linear_priority(priority_value)
     except ValueError as exc:
         raise ToolError(str(exc)) from exc
 
@@ -83,6 +124,7 @@ def _create_linear_ticket(arguments: dict[str, Any]) -> dict[str, Any]:
         "issue_id": issue["id"],
         "identifier": issue["identifier"],
         "url": issue["url"],
+        "defaults_applied": {"priority": priority_value} if not arguments.get("priority") else {},
     }
 
 
@@ -251,15 +293,11 @@ def _email_from_creator_arg(creator: str) -> str | None:
 
 
 def _send_linear_creator_summary(arguments: dict[str, Any]) -> dict[str, Any]:
-    required = (
-        "ticket_id_or_url",
-        "creator",
-        "attendee",
-        "summary",
-        "blockers",
-        "questions",
-        "next_steps",
-    )
+    # In Action Mode charlie-meet may omit creator (server pulls from Linear)
+    # and the three follow-up lists (default to empty). attendee + summary
+    # stay required: those are the substance of the recap and the server
+    # can't invent them.
+    required = ("ticket_id_or_url", "attendee", "summary")
     missing = [k for k in required if k not in arguments or arguments.get(k) in (None, "")]
     if missing:
         raise ToolError(f"missing required argument(s): {', '.join(missing)}")
@@ -267,6 +305,12 @@ def _send_linear_creator_summary(arguments: dict[str, Any]) -> dict[str, Any]:
     api_key = _require_env("LINEAR_API_KEY")
     bot_token = _require_env("SLACK_BOT_TOKEN")
     default_team_key = os.environ.get("LINEAR_DEFAULT_TEAM_KEY")
+
+    defaults_applied: dict[str, Any] = {}
+    for list_field in ("blockers", "questions", "next_steps"):
+        if list_field not in arguments or arguments.get(list_field) is None:
+            arguments[list_field] = []
+            defaults_applied[list_field] = []
 
     try:
         issue = linear_client.get_issue_context(
@@ -278,11 +322,14 @@ def _send_linear_creator_summary(arguments: dict[str, Any]) -> dict[str, Any]:
         raise ToolError(f"linear issue lookup failed: {exc}") from exc
 
     creator = issue.get("creator") or {}
-    creator_email = creator.get("email") or _email_from_creator_arg(arguments["creator"])
+    creator_arg = (arguments.get("creator") or "").strip()
+    creator_email = creator.get("email") or _email_from_creator_arg(creator_arg)
     if not creator_email:
         raise ToolError(
             "could not determine the ticket creator's email from Linear or the creator argument"
         )
+    if not creator_arg:
+        defaults_applied["creator"] = creator.get("email") or creator.get("displayName")
 
     text = _format_summary_message(arguments, issue)
     try:
@@ -295,7 +342,7 @@ def _send_linear_creator_summary(arguments: dict[str, Any]) -> dict[str, Any]:
     return {
         "sent": True,
         "creator": {
-            "name": creator.get("displayName") or creator.get("name") or arguments["creator"],
+            "name": creator.get("displayName") or creator.get("name") or creator_arg or None,
             "email": creator_email,
         },
         "ticket": {
@@ -304,6 +351,7 @@ def _send_linear_creator_summary(arguments: dict[str, Any]) -> dict[str, Any]:
             "title": issue.get("title"),
         },
         "slack": slack_result,
+        "defaults_applied": defaults_applied,
     }
 
 
@@ -336,7 +384,9 @@ def _resolve_attendee_email(query_str: str, *, api_key: str) -> tuple[str, dict[
 
 
 def _schedule_calendar_call(arguments: dict[str, Any]) -> dict[str, Any]:
-    required = ("attendee_name", "start_time", "duration", "topic", "ticket_id")
+    # start_time and duration are now optional — server fills defaults in
+    # Action Mode (tomorrow business day @ 10am, 30 minutes).
+    required = ("attendee_name", "topic", "ticket_id")
     missing = [k for k in required if not arguments.get(k)]
     if missing:
         raise ToolError(f"missing required argument(s): {', '.join(missing)}")
@@ -348,22 +398,35 @@ def _schedule_calendar_call(arguments: dict[str, Any]) -> dict[str, Any]:
     charlie_meet_email = _require_env("CHARLIE_MEET_EMAIL")
     calendar_id = os.environ.get("GOOGLE_CALENDAR_ID") or "primary"
 
-    try:
-        duration = int(arguments["duration"])
-    except (TypeError, ValueError) as exc:
-        raise ToolError(
-            f"invalid duration {arguments['duration']!r}; expected integer minutes"
-        ) from exc
+    defaults_applied: dict[str, Any] = {}
+
+    raw_duration = arguments.get("duration")
+    if raw_duration in (None, ""):
+        duration = _DEFAULT_DURATION_MINUTES
+        defaults_applied["duration"] = duration
+    else:
+        try:
+            duration = int(raw_duration)
+        except (TypeError, ValueError) as exc:
+            raise ToolError(
+                f"invalid duration {raw_duration!r}; expected integer minutes"
+            ) from exc
     if duration <= 0:
         raise ToolError(f"invalid duration {duration!r}; must be > 0 minutes")
 
-    try:
-        start_dt = datetime.fromisoformat(str(arguments["start_time"]))
-    except ValueError as exc:
-        raise ToolError(
-            f"invalid start_time {arguments['start_time']!r}; "
-            "expected ISO-8601 (e.g. 2026-06-01T15:00:00-07:00)"
-        ) from exc
+    raw_start = arguments.get("start_time")
+    if raw_start in (None, ""):
+        tz = _default_timezone()
+        start_dt = _next_business_day_at(_DEFAULT_START_HOUR, tz=tz)
+        defaults_applied["start_time"] = start_dt.isoformat()
+    else:
+        try:
+            start_dt = datetime.fromisoformat(str(raw_start))
+        except ValueError as exc:
+            raise ToolError(
+                f"invalid start_time {raw_start!r}; "
+                "expected ISO-8601 (e.g. 2026-06-01T15:00:00-07:00)"
+            ) from exc
     end_dt = start_dt + timedelta(minutes=duration)
 
     attendee_email, linear_user = _resolve_attendee_email(
@@ -464,6 +527,7 @@ def _schedule_calendar_call(arguments: dict[str, Any]) -> dict[str, Any]:
                 or (linear_user or {}).get("name")
             ),
         },
+        "defaults_applied": defaults_applied,
     }
 
 
