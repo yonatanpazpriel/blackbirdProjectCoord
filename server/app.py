@@ -82,7 +82,11 @@ def _is_tool_call(payload: dict[str, Any]) -> bool:
     if message_type:
         return False
 
-    return bool(payload.get("tool_call") or (payload.get("function") or {}).get("name"))
+    return bool(
+        payload.get("tool_call")
+        or (payload.get("function") or {}).get("name")
+        or _infer_tool_name(payload)
+    )
 
 
 def _check_webhook_auth() -> tuple[bool, Any]:
