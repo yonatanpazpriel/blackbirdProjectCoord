@@ -15,8 +15,10 @@ import logging
 import os
 import pathlib
 from typing import Any
+from urllib.parse import urljoin
 
-from flask import Flask, jsonify, request
+import requests
+from flask import Flask, jsonify, request, send_from_directory
 
 from server.tools import ToolError, dispatch
 
@@ -36,10 +38,18 @@ def _load_env_file(path: pathlib.Path) -> None:
 
 
 _REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
+_STATIC_DIR = _REPO_ROOT / "static"
 _load_env_file(_REPO_ROOT / ".env")
 
 
 app = Flask(__name__)
+
+
+_TAVUS_API_HOSTS = {
+    "prod": "https://tavusapi.com",
+    "stg": "https://tavusapi-stg.tavus.io",
+    "test": "https://tavusapi-test.tavus.io",
+}
 
 
 _LOG_LEVEL = os.environ.get("WEBHOOK_LOG_LEVEL", "INFO").upper()
@@ -230,3 +240,90 @@ def tavus_webhook():
 @app.get("/healthz")
 def healthz():
     return jsonify({"ok": True}), 200
+
+
+@app.get("/")
+def index():
+    """Serve the type-to-Charlie single-page frontend."""
+    return send_from_directory(_STATIC_DIR, "index.html")
+
+
+def _webhook_base_url() -> str:
+    """Return the public base URL used to build callback_url for Tavus.
+
+    Prefers PUBLIC_WEBHOOK_BASE_URL from env. Falls back to the incoming
+    request's host_url (works for ngrok/local dev where the browser is
+    hitting the same host that Tavus needs to call back into).
+    """
+    configured = os.environ.get("PUBLIC_WEBHOOK_BASE_URL")
+    if configured:
+        return configured.rstrip("/")
+    return request.host_url.rstrip("/")
+
+
+@app.post("/conversation")
+def create_conversation():
+    """Mint a Tavus conversation for the embedded replica and return its URL.
+
+    Body is optional. Recognized fields: ``persona_id`` (defaults to
+    ``CHARLIE_PERSONA_ID`` env), ``conversation_name``.
+    """
+    api_key = os.environ.get("TAVUS_API_KEY")
+    if not api_key:
+        return jsonify({"error": "server not configured: TAVUS_API_KEY unset"}), 500
+
+    body = request.get_json(silent=True) or {}
+    persona_id = body.get("persona_id") or os.environ.get("CHARLIE_PERSONA_ID")
+    if not persona_id:
+        return (
+            jsonify(
+                {
+                    "error": "no persona_id: pass one in the request body or set "
+                    "CHARLIE_PERSONA_ID in the environment"
+                }
+            ),
+            400,
+        )
+
+    env_name = (os.environ.get("TAVUS_ENV") or "prod").lower()
+    host = _TAVUS_API_HOSTS.get(env_name, _TAVUS_API_HOSTS["prod"])
+
+    callback_url = urljoin(_webhook_base_url() + "/", "tavus/webhook")
+    payload: dict[str, Any] = {
+        "persona_id": persona_id,
+        "callback_url": callback_url,
+    }
+    if body.get("conversation_name"):
+        payload["conversation_name"] = body["conversation_name"]
+
+    try:
+        resp = requests.post(
+            f"{host}/v2/conversations",
+            headers={"x-api-key": api_key, "Content-Type": "application/json"},
+            json=payload,
+            timeout=30,
+        )
+    except requests.RequestException as exc:
+        app.logger.exception("Tavus conversation create failed: %s", exc)
+        return jsonify({"error": f"tavus request failed: {exc}"}), 502
+
+    if not resp.ok:
+        app.logger.warning(
+            "Tavus /v2/conversations -> %s %s", resp.status_code, _short(resp.text, 400)
+        )
+        return (
+            jsonify({"error": f"tavus returned {resp.status_code}: {resp.text}"}),
+            resp.status_code,
+        )
+
+    data = resp.json()
+    return (
+        jsonify(
+            {
+                "conversation_id": data.get("conversation_id"),
+                "conversation_url": data.get("conversation_url"),
+                "status": data.get("status"),
+            }
+        ),
+        200,
+    )

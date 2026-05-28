@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Type to Charlie</title>
+    <style>
+      :root {
+        --bg: #0e1116;
+        --panel: #161b22;
+        --panel-2: #1f2630;
+        --border: #2a313c;
+        --text: #e6edf3;
+        --muted: #8b949e;
+        --accent: #58a6ff;
+        --accent-hover: #79b8ff;
+        --danger: #f85149;
+        --success: #56d364;
+      }
+      * { box-sizing: border-box; }
+      html, body { height: 100%; margin: 0; }
+      body {
+        background: var(--bg);
+        color: var(--text);
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter,
+          system-ui, sans-serif;
+        font-size: 14px;
+        display: flex;
+        flex-direction: column;
+      }
+      header {
+        padding: 14px 20px;
+        border-bottom: 1px solid var(--border);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        background: var(--panel);
+      }
+      header h1 {
+        margin: 0;
+        font-size: 16px;
+        font-weight: 600;
+      }
+      header .status {
+        font-size: 12px;
+        color: var(--muted);
+      }
+      main {
+        flex: 1;
+        display: grid;
+        grid-template-columns: 1fr 360px;
+        min-height: 0;
+      }
+      #video-wrap {
+        position: relative;
+        background: #000;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      #video {
+        width: 100%;
+        height: 100%;
+      }
+      #video iframe {
+        width: 100%;
+        height: 100%;
+        border: 0;
+      }
+      .placeholder {
+        color: var(--muted);
+        text-align: center;
+        padding: 40px;
+      }
+      .placeholder button {
+        margin-top: 16px;
+      }
+      aside {
+        background: var(--panel);
+        border-left: 1px solid var(--border);
+        padding: 16px;
+        overflow-y: auto;
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+      }
+      aside h2 {
+        margin: 0 0 4px 0;
+        font-size: 13px;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        color: var(--muted);
+      }
+      .form {
+        background: var(--panel-2);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 12px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      .form label {
+        font-size: 12px;
+        color: var(--muted);
+      }
+      .form input,
+      .form select {
+        background: #0d1117;
+        border: 1px solid var(--border);
+        color: var(--text);
+        border-radius: 4px;
+        padding: 8px 10px;
+        font-size: 13px;
+        width: 100%;
+      }
+      .form input:focus,
+      .form select:focus {
+        outline: none;
+        border-color: var(--accent);
+      }
+      button {
+        background: var(--accent);
+        color: #0d1117;
+        border: 0;
+        border-radius: 4px;
+        padding: 8px 14px;
+        font-size: 13px;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      button:hover { background: var(--accent-hover); }
+      button:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+      button.secondary {
+        background: transparent;
+        color: var(--text);
+        border: 1px solid var(--border);
+      }
+      button.secondary:hover { background: var(--panel-2); }
+      button.danger { background: var(--danger); color: white; }
+      button.danger:hover { background: #ff6f63; }
+      .row-actions {
+        display: flex;
+        gap: 8px;
+      }
+      .roster {
+        background: var(--panel-2);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        overflow: hidden;
+      }
+      .roster-row {
+        padding: 10px 12px;
+        border-bottom: 1px solid var(--border);
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+      }
+      .roster-row:last-child { border-bottom: 0; }
+      .roster-row .name {
+        font-weight: 600;
+      }
+      .roster-row .meta {
+        font-size: 12px;
+        color: var(--muted);
+      }
+      .roster-row .role {
+        display: inline-block;
+        padding: 1px 6px;
+        border-radius: 3px;
+        font-size: 11px;
+        background: #1f6feb33;
+        color: var(--accent);
+        margin-left: 6px;
+      }
+      .roster-empty {
+        padding: 14px;
+        text-align: center;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .status-dot {
+        display: inline-block;
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: var(--muted);
+        margin-right: 6px;
+      }
+      .status-dot.live { background: var(--success); }
+      .status-dot.error { background: var(--danger); }
+      .error-banner {
+        background: #f8514922;
+        border: 1px solid var(--danger);
+        color: var(--danger);
+        padding: 8px 12px;
+        border-radius: 4px;
+        font-size: 12px;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Type to Charlie</h1>
+      <div class="status">
+        <span id="status-dot" class="status-dot"></span>
+        <span id="status-text">not connected</span>
+      </div>
+    </header>
+    <main>
+      <div id="video-wrap">
+        <div id="video" style="display:none"></div>
+        <div id="placeholder" class="placeholder">
+          <div>Start a call to chat with Charlie.</div>
+          <button id="start-btn">Start call</button>
+          <div id="start-error" style="display:none; margin-top:12px;" class="error-banner"></div>
+        </div>
+      </div>
+      <aside>
+        <div>
+          <h2>Add contact</h2>
+          <div class="form">
+            <div>
+              <label for="name">Name</label>
+              <input id="name" type="text" placeholder="Yonatan Paz Priel" autocomplete="off" />
+            </div>
+            <div>
+              <label for="email">Email</label>
+              <input id="email" type="email" placeholder="yonatan@tavus.io" autocomplete="off" />
+            </div>
+            <div>
+              <label for="role">Role</label>
+              <select id="role">
+                <option value="assignee">assignee</option>
+                <option value="creator">creator</option>
+                <option value="attendee">attendee</option>
+              </select>
+            </div>
+            <div class="row-actions">
+              <button id="add-btn" disabled>Add</button>
+              <button id="clear-btn" class="secondary" disabled>Clear all</button>
+            </div>
+            <div id="form-error" style="display:none" class="error-banner"></div>
+          </div>
+        </div>
+        <div>
+          <h2>Charlie sees</h2>
+          <div id="roster" class="roster">
+            <div class="roster-empty">No contacts typed yet. Start a call, then add one.</div>
+          </div>
+        </div>
+      </aside>
+    </main>
+
+    <script src="https://unpkg.com/@daily-co/daily-js"></script>
+    <script>
+      const state = {
+        callFrame: null,
+        conversationId: null,
+        roster: [],
+      };
+
+      const els = {
+        startBtn: document.getElementById("start-btn"),
+        startError: document.getElementById("start-error"),
+        placeholder: document.getElementById("placeholder"),
+        video: document.getElementById("video"),
+        addBtn: document.getElementById("add-btn"),
+        clearBtn: document.getElementById("clear-btn"),
+        name: document.getElementById("name"),
+        email: document.getElementById("email"),
+        role: document.getElementById("role"),
+        roster: document.getElementById("roster"),
+        formError: document.getElementById("form-error"),
+        statusDot: document.getElementById("status-dot"),
+        statusText: document.getElementById("status-text"),
+      };
+
+      function setStatus(text, kind) {
+        els.statusText.textContent = text;
+        els.statusDot.className = "status-dot" + (kind ? " " + kind : "");
+      }
+
+      function showFormError(msg) {
+        els.formError.style.display = "block";
+        els.formError.textContent = msg;
+      }
+      function clearFormError() {
+        els.formError.style.display = "none";
+        els.formError.textContent = "";
+      }
+
+      function renderRoster() {
+        if (state.roster.length === 0) {
+          els.roster.innerHTML =
+            '<div class="roster-empty">No contacts typed yet. Start a call, then add one.</div>';
+          return;
+        }
+        els.roster.innerHTML = state.roster
+          .map(
+            (r) => `
+              <div class="roster-row">
+                <div class="name">${escapeHtml(r.name)}<span class="role">${escapeHtml(r.role)}</span></div>
+                <div class="meta">${escapeHtml(r.email)}</div>
+              </div>
+            `,
+          )
+          .join("");
+      }
+
+      function escapeHtml(s) {
+        return String(s)
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")
+          .replace(/"/g, "&quot;")
+          .replace(/'/g, "&#39;");
+      }
+
+      async function startCall() {
+        els.startBtn.disabled = true;
+        els.startError.style.display = "none";
+        setStatus("starting...", null);
+        try {
+          const resp = await fetch("/conversation", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({}),
+          });
+          const data = await resp.json();
+          if (!resp.ok) {
+            throw new Error(data.error || `HTTP ${resp.status}`);
+          }
+          if (!data.conversation_url) {
+            throw new Error("server returned no conversation_url");
+          }
+          state.conversationId = data.conversation_id || null;
+
+          els.placeholder.style.display = "none";
+          els.video.style.display = "block";
+
+          state.callFrame = window.DailyIframe.createFrame(els.video, {
+            iframeStyle: { width: "100%", height: "100%", border: "0" },
+            showLeaveButton: true,
+          });
+          state.callFrame.on("joined-meeting", () => {
+            setStatus("connected", "live");
+            els.addBtn.disabled = false;
+            els.clearBtn.disabled = false;
+          });
+          state.callFrame.on("left-meeting", () => {
+            setStatus("call ended", null);
+            els.addBtn.disabled = true;
+            els.clearBtn.disabled = true;
+          });
+          state.callFrame.on("error", (e) => {
+            console.error("daily error", e);
+            setStatus("error: " + (e.errorMsg || "unknown"), "error");
+          });
+          await state.callFrame.join({ url: data.conversation_url });
+        } catch (err) {
+          console.error(err);
+          els.startError.style.display = "block";
+          els.startError.textContent = "failed to start call: " + err.message;
+          els.startBtn.disabled = false;
+          setStatus("not connected", null);
+        }
+      }
+
+      function sendAppendContext(text) {
+        if (!state.callFrame) return;
+        state.callFrame.sendAppMessage(
+          {
+            message_type: "conversation",
+            event_type: "conversation.append_llm_context",
+            conversation_id: state.conversationId,
+            properties: { context: text },
+          },
+          "*",
+        );
+      }
+
+      function addContact() {
+        clearFormError();
+        const name = els.name.value.trim();
+        const email = els.email.value.trim();
+        const role = els.role.value;
+        if (!name) return showFormError("Name is required.");
+        if (!email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+          return showFormError("Enter a valid email.");
+        }
+        if (!state.callFrame) return showFormError("Start a call first.");
+
+        const entry = { name, email, role };
+        state.roster.push(entry);
+        renderRoster();
+
+        const note = `User-typed contact (role: ${role}) — name: "${name}", email: "${email}". Prefer this email over asking again.`;
+        sendAppendContext(note);
+
+        els.name.value = "";
+        els.email.value = "";
+        els.name.focus();
+      }
+
+      function clearAll() {
+        if (state.roster.length === 0) return;
+        state.roster = [];
+        renderRoster();
+        sendAppendContext(
+          "Disregard all previously listed user-typed contacts. The user-typed roster is now empty.",
+        );
+      }
+
+      els.startBtn.addEventListener("click", startCall);
+      els.addBtn.addEventListener("click", addContact);
+      els.clearBtn.addEventListener("click", clearAll);
+      els.email.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && !els.addBtn.disabled) addContact();
+      });
+      els.name.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") els.email.focus();
+      });
+    </script>
+  </body>
+</html>

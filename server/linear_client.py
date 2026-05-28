@@ -31,8 +31,24 @@ class AssigneeAmbiguous(LinearError):
 _team_id_cache: dict[str, str] = {}
 
 
-def normalize_issue_identifier(ticket_id_or_url: str) -> str:
-    """Extract a Linear issue identifier from an identifier or issue URL."""
+def normalize_issue_identifier(
+    ticket_id_or_url: str,
+    *,
+    default_team_key: str | None = None,
+) -> str:
+    """Extract a Linear issue identifier from an identifier or issue URL.
+
+    Accepts (in order of priority):
+      - ``ENT-123`` / ``e-1`` / a URL containing one — returned uppercased.
+      - ``ENT 123`` / ``ENT123`` (whitespace-flexible) — joined with a hyphen.
+      - Bare digits or ``#123`` — when ``default_team_key`` is supplied,
+        returned as ``{TEAM}-123``. The LLM frequently drops the team
+        prefix when the user says "ticket 542" verbally; this rescues that
+        case.
+
+    Anything else is returned untouched — Linear will produce a clean
+    "Entity not found" that we surface back to the caller.
+    """
     value = ticket_id_or_url.strip()
     match = re.search(r"\b[A-Z][A-Z0-9]*-\d+\b", value, flags=re.IGNORECASE)
     if match:
@@ -41,6 +57,11 @@ def normalize_issue_identifier(ticket_id_or_url: str) -> str:
     spoken_match = re.search(r"\b([A-Z][A-Z0-9]*?)\s*(\d+)\b", value, flags=re.IGNORECASE)
     if spoken_match:
         return f"{spoken_match.group(1).upper()}-{spoken_match.group(2)}"
+
+    if default_team_key:
+        digits_only = re.fullmatch(r"\s*#?\s*(\d+)\s*", value)
+        if digits_only:
+            return f"{default_team_key.upper()}-{digits_only.group(1)}"
 
     return value
 
@@ -173,9 +194,21 @@ def create_issue(
     return result["issue"]
 
 
-def get_issue_context(ticket_id_or_url: str, *, api_key: str) -> dict[str, Any]:
-    """Fetch issue details needed by the meeting coordinator persona."""
-    identifier = normalize_issue_identifier(ticket_id_or_url)
+def get_issue_context(
+    ticket_id_or_url: str,
+    *,
+    api_key: str,
+    default_team_key: str | None = None,
+) -> dict[str, Any]:
+    """Fetch issue details needed by the meeting coordinator persona.
+
+    ``default_team_key`` is forwarded to :func:`normalize_issue_identifier`
+    so bare numeric IDs (the LLM-drops-the-prefix case) resolve against the
+    configured default team.
+    """
+    identifier = normalize_issue_identifier(
+        ticket_id_or_url, default_team_key=default_team_key
+    )
     query = """
     query($id: String!) {
         issue(id: $id) {

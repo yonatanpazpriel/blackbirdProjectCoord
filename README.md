@@ -15,12 +15,17 @@ scripts/
   create_persona.py              # POST personas/<name>.json to Tavus /v2/personas
   google_oauth_refresh_token.py  # one-time helper to mint a Calendar refresh token
 server/
-  app.py                # Flask: POST /tavus/webhook (tool_call receiver)
+  app.py                # Flask: POST /tavus/webhook (tool_call receiver), GET /, POST /conversation
   tools.py              # tool-name dispatcher
   linear_client.py      # Linear GraphQL client
   google_calendar.py    # Google Calendar v3 + Meet client (refresh-token auth)
   slack_client.py       # Slack Web API client
+  meeting_registry.py   # JSON-backed store: meet_link -> scheduled ticket + attendee
   priority.py           # persona priority -> Linear int mapping
+data/
+  meetings.json         # gitignored; created on first schedule_calendar_call call
+static/
+  index.html            # type-to-Charlie single-page frontend (Daily iframe + roster panel)
 ```
 
 ## Create the persona
@@ -227,6 +232,56 @@ calls into real Linear tickets and Charlie Meet follow-up Slack DMs.
    `{"result": {"event_id": "...", "html_link": "https://www.google.com/calendar/event?eid=...", "meet_link": "https://meet.google.com/...", "attendees": [...], "ticket": {"identifier": "ENT-123", ...}}}`
    and Google emails the invite to both the attendee and `CHARLIE_MEET_EMAIL`.
 
+   As a side effect, the server writes a row to `data/meetings.json` keyed by
+   the new Meet URL with the full Linear ticket dump (identifier, title,
+   description, priority, status, creator name+email, due date, labels,
+   comments) plus the attendee and the free-text topic. This is what
+   `get_meeting_context` reads back at meeting time.
+
+9. Smoke test `get_meeting_context` (the lookup charlie-meet does on join):
+
+   ```bash
+   curl -X POST http://localhost:8080/tavus/webhook \
+     -H "X-Webhook-Secret: $TAVUS_WEBHOOK_SECRET" \
+     -H "Content-Type: application/json" \
+     -d '{
+       "tool_call": {
+         "name": "get_meeting_context",
+         "arguments": {}
+       }
+     }'
+   ```
+
+   With no `meet_link`, the server returns the most recently scheduled
+   meeting that hasn't been claimed yet and marks it claimed (so the next
+   no-arg lookup won't re-return it). Pass `{"meet_link": "https://meet.google.com/..."}`
+   to do an exact match without claiming. On success the response is
+   `{"result": {"meet_link": "...", "ticket": {...full dump...}, "scheduled": {"start": "...", "end": "...", "event_id": "..."}}}`.
+
+## How charlie-meet gets ticket context inside a Meet
+
+Google Meet doesn't expose calendar metadata (title, description,
+attendees) to participants over WebRTC, so charlie-meet has no way to read
+the event details from inside the room. Tavus's conferencing-alias
+auto-join also doesn't propagate the calendar description into the
+conversation's `conversational_context`. We bridge the gap with a local
+registry:
+
+1. When Charlie runs `schedule_calendar_call`, the server creates the
+   Google Calendar event **and** writes the Meet URL plus the full Linear
+   ticket to `data/meetings.json`.
+2. charlie-meet joins via the conferencing alias as usual.
+3. The first thing charlie-meet does on join (per its system prompt) is
+   call `get_meeting_context`. The server returns the ticket dump for that
+   Meet, so charlie-meet can confirm the identifier and dive in without
+   asking the attendee.
+4. If the meeting wasn't scheduled through Charlie (no registry row),
+   `get_meeting_context` errors and charlie-meet falls back to asking for
+   the ticket ID + calling `get_linear_ticket_context`.
+
+The registry file path is configurable via `MEETING_REGISTRY_PATH`;
+default is `data/meetings.json` at the repo root (gitignored).
+
 ## Google Calendar setup
 
 `schedule_calendar_call` writes events to a Google Calendar via the v3 REST
@@ -271,6 +326,59 @@ human OAuth dance.
    is configured to auto-join meets for — every check-in invites this address
    as a second attendee so charlie-meet seats itself in the Meet at call
    time.
+
+## Frontend (type to Charlie)
+
+A single static page at `GET /` embeds the Tavus replica via Daily's iframe
+SDK and lets you type `{name, email, role}` rows that Charlie silently sees in
+her LLM context — so you don't have to spell out email addresses out loud and
+Charlie pulls the exact value into `create_linear_ticket.assignee` /
+`schedule_calendar_call.attendee_name`.
+
+How it wires up:
+
+- `GET /` serves `static/index.html` (no build step; one CDN script tag for
+  `@daily-co/daily-js`).
+- **Start call** in the page hits `POST /conversation`, which calls Tavus
+  `POST /v2/conversations` with `persona_id` (defaults to `CHARLIE_PERSONA_ID`)
+  and `callback_url` = `<PUBLIC_WEBHOOK_BASE_URL or request host>/tavus/webhook`,
+  then returns `{conversation_id, conversation_url}` and mounts the Daily
+  iframe.
+- Each **Add** in the roster panel calls `callFrame.sendAppMessage(...)` with
+
+  ```json
+  {
+    "message_type": "conversation",
+    "event_type": "conversation.append_llm_context",
+    "conversation_id": "<id>",
+    "properties": { "context": "User-typed contact (role: assignee) — name: \"…\", email: \"…\". Prefer this email over asking again." }
+  }
+  ```
+
+  which the CVI runtime handles by appending to the LLM context silently (no
+  spoken response). **Clear all** appends a "disregard previously listed
+  contacts" note and empties the visible list.
+
+Env vars used by the frontend path (already documented above):
+
+- `TAVUS_API_KEY` — required for `POST /conversation`.
+- `CHARLIE_PERSONA_ID` — default persona for `POST /conversation`.
+- `PUBLIC_WEBHOOK_BASE_URL` — optional; public URL used to build
+  `callback_url`. Falls back to the request's `host_url` (works for ngrok and
+  any deployed host).
+
+Local dev:
+
+```bash
+flask --app server.app run --port 8080
+# open http://localhost:8080/
+# expose with ngrok if you want the tool webhook deliverable:
+ngrok http 8080
+# then set PUBLIC_WEBHOOK_BASE_URL=https://<ngrok>.ngrok.app and restart Flask
+```
+
+On Vercel the same `GET /` works as-is — `vercel.json` already rewrites
+`/(.*) → /api/index`, which re-exports the Flask app.
 
 ## Related repos
 
